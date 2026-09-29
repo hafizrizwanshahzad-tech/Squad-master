@@ -208,7 +208,7 @@ function showMainMenu()
   mainLay.addView(greetingTv)
 
   local headerTv = TextView(ctx)
-  headerTv.setText("Developed by rlc board")
+  headerTv.setText("Developed by rizvi Lover cricket board")
   headerTv.setTextSize(14)
   headerTv.setTextColor(0xFF555555)
   headerTv.setTypeface(nil, 1)
