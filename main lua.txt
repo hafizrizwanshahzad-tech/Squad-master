@@ -1,285 +1,1161 @@
-local ctx = service or activity
-local pluginDir = "/storage/emulated/0/解说/Plugins/saeedi/"
-
 require "import"
 import "android.widget.*"
-import "android.net.Uri"
-import "android.content.Intent"
+import "android.content.*"
 import "android.view.*"
-import "android.view.KeyEvent"
 import "java.io.File"
-import "android.content.Context"
+import "android.text.TextWatcher"
 import "android.os.Handler"
 import "android.os.Looper"
-import "android.content.ClipboardManager"
-import "android.content.ClipData"
-import "com.androlua.Http"
-import "cjson"
+import "android.view.accessibility.AccessibilityNodeInfo"
+import "android.net.Uri"
+import "android.graphics.Typeface"
 
-function showToast(message)
-  Handler(Looper.getMainLooper()).post(function()
-    pcall(function()
-      Toast.makeText(ctx, message, Toast.LENGTH_SHORT).show()
-    end)
+local dlg = LuaDialog()
+local ctx = activity or service or this
+
+-- === Storage Fix ===
+local folderPath = "/storage/emulated/0/Documents/DataSaverApp"
+pcall(function()
+  if ctx and ctx.getFilesDir then
+    folderPath = ctx.getFilesDir().getAbsolutePath()
+  end
+end)
+
+local folder = File(folderPath)
+if not folder.exists() then folder.mkdirs() end
+
+local dataFile = folderPath .. "/Rizvi_Saved_Items_V4.txt"
+local savedData = {}
+local main_ids = {}
+
+-- === Forward Declarations (To prevent Nil Errors) ===
+local rebuildList
+local addTitleButton
+local showEditDialog
+local showAddDialog
+local showImportExportDialog
+
+-- === Utility Functions ===
+local function showToast(text)
+  pcall(function()
+    Toast.makeText(ctx, text, Toast.LENGTH_SHORT).show()
   end)
 end
 
-local APP_PREFS = "SquadMaster_Prefs"
-local prefs = ctx.getSharedPreferences(APP_PREFS, Context.MODE_PRIVATE)
-
-function isVibrationEnabled()
-  return prefs.getBoolean("vibration", true)
-end
-
-function triggerFeedback()
+local function speakTTS(text)
   pcall(function()
-    if isVibrationEnabled() and ctx then
-      ctx.getSystemService(Context.VIBRATOR_SERVICE).vibrate(50)
+    if speak then
+      speak(text) 
+    elseif service and service.speak then
+      service.speak(text)
     end
   end)
 end
 
-activeDialogs = {}
-
-function registerDialog(dlg)
-  if dlg then
-    table.insert(activeDialogs, dlg)
-  end
-end
-
-function dismissAllDialogs()
-  for _, d in ipairs(activeDialogs) do
-    pcall(function() d.dismiss() end)
-  end
-  activeDialogs = {}
-end
-
-function copyOnlyText(text)
+local function vibrateDevice()
   pcall(function()
-    triggerFeedback()
-    local clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
-    local clip = ClipData.newPlainText("label", text)
-    clipboard.setPrimaryClip(clip)
-    showToast("Copied to Clipboard!")
+    local vibrator = ctx.getSystemService(Context.VIBRATOR_SERVICE)
+    vibrator.vibrate(100) 
   end)
 end
 
-function shareTextMenu(text)
+local function openLink(url)
   pcall(function()
-    triggerFeedback()
-    dismissAllDialogs()
-    Handler(Looper.getMainLooper()).postDelayed(Runnable({
-      run = function()
-        pcall(function()
-          local intent = Intent(Intent.ACTION_SEND)
-          intent.setType("text/plain")
-          intent.putExtra(Intent.EXTRA_TEXT, text)
-          local chooser = Intent.createChooser(intent, "Share Squad via...")
-          chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-          ctx.startActivity(chooser)
-        end)
+    local intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    ctx.startActivity(intent)
+  end)
+end
+
+local function sortData()
+  table.sort(savedData, function(a, b)
+    local t1 = a.title and tostring(a.title):lower() or ""
+    local t2 = b.title and tostring(b.title):lower() or ""
+    return t1 < t2
+  end)
+end
+
+local function saveData()
+  sortData()
+  pcall(function()
+    local f = io.open(dataFile, "w")
+    if f then
+      for _, item in ipairs(savedData) do
+        local safe_content = tostring(item.content):gsub("\n", "<NEWLINE>")
+        f:write(tostring(item.title) .. "|_|_|" .. safe_content .. "\n")
       end
-    }), 150)
+      f:close()
+    else
+      showToast("Error: Data could not be saved!")
+    end
   end)
 end
 
-function openWhatsApp(number, msg)
+local function loadData()
+  savedData = {}
   pcall(function()
-    dismissAllDialogs()
-    local textStr = msg or "Assalam-o-Alaikum! I am using the Squad Master extension."
-    local intent = Intent(Intent.ACTION_VIEW, Uri.parse("whatsapp://send?phone=" .. number .. "&text=" .. Uri.encode(textStr)))
-    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    ctx.startActivity(intent)
-  end)
-end
-
-function openYouTubeChannel(urlStr)
-  pcall(function()
-    dismissAllDialogs()
-    local intent = Intent(Intent.ACTION_VIEW, Uri.parse(urlStr))
-    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    ctx.startActivity(intent)
-  end)
-end
-
-function openWhatsAppLink(url)
-    pcall(function()
-        dismissAllDialogs()
-        local options = {"WhatsApp Messenger", "WhatsApp Business"}
-        local pDlg = LuaDialog(ctx)
-        registerDialog(pDlg)
-        pDlg.setTitle("Choose WhatsApp")
-        local l = LinearLayout(ctx)
-        l.setOrientation(1)
-        l.setPadding(30, 30, 30, 30)
-        for idx, optName in ipairs(options) do
-            local btn = Button(ctx)
-            btn.setText(optName)
-            btn.onClick = function()
-                triggerFeedback()
-                pDlg.dismiss()
-                local pkgName = (idx == 1) and "com.whatsapp" or "com.whatsapp.w4b"
-                pcall(function()
-                    local intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                    intent.setPackage(pkgName)
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    ctx.startActivity(intent)
-                end)
-            end
-            l.addView(btn)
+    local f = io.open(dataFile, "r")
+    if f then
+      for line in f:lines() do
+        local t, c = line:match("^(.*)|_|_|(.*)$")
+        if t and c then
+          c = c:gsub("\r", "")
+          local original_content = c:gsub("<NEWLINE>", "\n")
+          table.insert(savedData, {title = t, content = original_content})
         end
-        pDlg.setView(l)
-        pDlg.show()
-    end)
-end
-
-pcall(dofile, pluginDir .. "Squad master.lua")
-pcall(dofile, pluginDir .. "AI assistant.lua")
-pcall(dofile, pluginDir .. "Setting.lua")
-pcall(dofile, pluginDir .. "About.lua")
-
-function showExitConfirmation(parentDlg)
-  triggerFeedback()
-  local exitDlg = LuaDialog(ctx)
-  registerDialog(exitDlg)
-  exitDlg.setTitle("Exit Confirmation")
-  
-  local exitLay = LinearLayout(ctx)
-  exitLay.setOrientation(1)
-  exitLay.setPadding(30, 30, 30, 30)
-  
-  local exitMsg = TextView(ctx)
-  exitMsg.setText("Are you sure you want to close this extension?")
-  exitMsg.setTextSize(16)
-  exitMsg.setPadding(0, 0, 0, 20)
-  exitLay.addView(exitMsg)
-  
-  local btnRow = LinearLayout(ctx)
-  btnRow.setOrientation(0)
-  
-  local yesBtn = Button(ctx)
-  yesBtn.setText("Yes")
-  yesBtn.setLayoutParams(LinearLayout.LayoutParams(0, -2, 1))
-  yesBtn.onClick = function()
-    triggerFeedback()
-    dismissAllDialogs()
-    if parentDlg then
-      pcall(function() parentDlg.dismiss() end)
-    end
-    pcall(function()
-      if ctx.stopSelf then
-        ctx.stopSelf()
-      elseif ctx.finish then
-        ctx.finish()
       end
-    end)
-  end
-  
-  local noBtn = Button(ctx)
-  noBtn.setText("No")
-  noBtn.setLayoutParams(LinearLayout.LayoutParams(0, -2, 1))
-  noBtn.onClick = function()
-    triggerFeedback()
-    exitDlg.dismiss()
-  end
-  
-  btnRow.addView(yesBtn)
-  btnRow.addView(noBtn)
-  exitLay.addView(btnRow)
-  exitDlg.setView(exitLay)
-  exitDlg.show()
-end
-
-function showMainMenu()
-  local dlg = LuaDialog(ctx)
-  registerDialog(dlg)
-  dlg.setTitle("Squad Master")
-  local mainLay = LinearLayout(ctx)
-  mainLay.setOrientation(1)
-  mainLay.setPadding(30, 30, 30, 30)
-
-  local greetingTv = TextView(ctx)
-  greetingTv.setText("Welcome Squad Master")
-  greetingTv.setTextSize(18)
-  greetingTv.setTextColor(0xFF00796B)
-  greetingTv.setTypeface(nil, 1)
-  greetingTv.setGravity(Gravity.CENTER)
-  greetingTv.setPadding(0, 0, 0, 5)
-  mainLay.addView(greetingTv)
-
-  local headerTv = TextView(ctx)
-  headerTv.setText("Developed by rizvi Lover cricket board")
-  headerTv.setTextSize(14)
-  headerTv.setTextColor(0xFF555555)
-  headerTv.setTypeface(nil, 1)
-  headerTv.setGravity(Gravity.CENTER)
-  headerTv.setPadding(0, 0, 0, 20)
-  mainLay.addView(headerTv)
-
-  local b2 = Button(ctx)
-  b2.setText("Squad Manager")
-  b2.onClick = function()
-    if showTeamSquadOptions then
-      showTeamSquadOptions()
-    else
-      showToast("Squad Master module not loaded!")
+      f:close()
     end
-  end
-  mainLay.addView(b2)
-  
-  local bAi = Button(ctx)
-  bAi.setText("AI Assistant")
-  bAi.onClick = function()
-    if openAiWeb then
-      openAiWeb()
-    else
-      showToast("AI Assistant module not loaded!")
-    end
-  end
-  mainLay.addView(bAi)
-
-  -- یہاں Settings کا بٹن پہلے کر دیا گیا ہے
-  local bSettings = Button(ctx)
-  bSettings.setText("Settings")
-  bSettings.onClick = function()
-    if showSettings then
-      showSettings()
-    else
-      showToast("Settings module not loaded!")
-    end
-  end
-  mainLay.addView(bSettings)
-
-  -- یہاں About کا بٹن اس کی جگہ پر کر دیا گیا ہے
-  local bAbout = Button(ctx)
-  bAbout.setText("About")
-  bAbout.onClick = function()
-    if showAboutDialog then
-      showAboutDialog()
-    else
-      showToast("About module not loaded!")
-    end
-  end
-  mainLay.addView(bAbout)
-
-  local b4 = Button(ctx)
-  b4.setText("Exit")
-  b4.onClick = function() 
-    showExitConfirmation(dlg)
-  end
-  mainLay.addView(b4)
-
-  dlg.setView(mainLay)
-  dlg.setCancelable(false)
-  dlg.setOnKeyListener(function(dialog, keyCode, event)
-    if keyCode == KeyEvent.KEYCODE_BACK and event.getAction() == KeyEvent.ACTION_UP then
-      showExitConfirmation(dlg)
-      return true
-    end
-    return false
   end)
-
-  dlg.show()
+  sortData()
 end
 
-showMainMenu()
+local function showAboutDialog()
+  local abt_dlg = LuaDialog()
+  abt_dlg.setTitle("About Data Saver Pro")
+  
+  local about_text = [[Extension Name: Data Saver (Pro Version)
+Developer: RLC Board
+
+棣冨皞 FEATURES DETAILS 棣冨皞
+1. One-Tap Auto Paste:
+Your saved data is automatically pasted into any text box with just a single click.
+
+2. Smart Character Limits:
+Character limits of 100 for the Title and 10000 for the Description, complete with a live typing counter.
+
+3. Auto Alphabetical Sorting:
+All your data is automatically sorted in alphabetical (A to Z) order for easy searching and management.
+
+4. Advanced Backup & Restore:
+Export ALL data or SELECT specific items to backup into a single .txt file. Import that same file at any time to restore your data perfectly.
+
+馃弿 Welcome to Rizvi Lover Cricket Board! 馃弿
+
+Are you a true Hand Cricket fan? Want to stay connected with the latest updates, thrilling matches, and exclusive Hand Cricket content? You are in the right place! 
+
+Join Rizvi Lover Cricket Board and never miss a single moment of the Hand Cricket action. Let's enjoy the game together! 馃檶]]
+
+  local about_layout = {
+    ScrollView;
+    layout_width = "fill";
+    {
+      LinearLayout;
+      orientation = "vertical";
+      padding = "20dp";
+      {
+        TextView;
+        text = about_text;
+        textSize = "14sp";
+        layout_marginBottom = "15dp";
+        textColor = "#333333";
+      };
+      {
+        Button;
+        text = "Contact & Feedback";
+        layout_width = "fill";
+        layout_marginBottom = "5dp";
+        onClick = function()
+          local msg = "Hello RLC Board, I have some feedback regarding the Data Saver Extension."
+          openLink("https://wa.me/923364971212?text=" .. msg:gsub(" ", "%%20"))
+          abt_dlg.dismiss()
+          dlg.dismiss()
+        end;
+      };
+      {
+        Button;
+        text = "馃寪 Join My WhatsApp Community";
+        layout_width = "fill";
+        layout_marginBottom = "5dp";
+        onClick = function()
+          openLink("https://chat.whatsapp.com/KmBYjpgjDIaEyJBK7Paqwn")
+          abt_dlg.dismiss()
+          dlg.dismiss()
+        end;
+      };
+      {
+        Button;
+        text = "馃摫 Follow My WhatsApp Channel";
+        layout_width = "fill";
+        layout_marginBottom = "5dp";
+        onClick = function()
+          openLink("https://whatsapp.com/channel/0029Vb75cJe2v1ImcvK0w71w")
+          abt_dlg.dismiss()
+          dlg.dismiss()
+        end;
+      };
+      {
+        Button;
+        text = "鈻讹笍 Subscribe My YouTube Channel";
+        layout_width = "fill";
+        layout_marginBottom = "5dp";
+        onClick = function()
+          openLink("https://youtube.com/@rizvikechahnewale?si=vdUSo6mX2nDgUAa4")
+          abt_dlg.dismiss()
+          dlg.dismiss()
+        end;
+      };
+    };
+  }
+  
+  abt_dlg.setView(loadlayout(about_layout))
+  abt_dlg.setButton("Close", function() abt_dlg.dismiss() end)
+  abt_dlg.show()
+end
+
+-- === EXPORT / IMPORT SYSTEM ===
+local function performExport(itemsToExport)
+  if #itemsToExport == 0 then
+    showToast("No items to export!")
+    return
+  end
+  
+  local timeStr = os.date("%Y%m%d_%H%M%S")
+  local exportPath = "/storage/emulated/0/Download/DataSaver_Backup_" .. timeStr .. ".txt"
+  
+  pcall(function()
+    local f = io.open(exportPath, "w")
+    if f then
+      for _, item in ipairs(itemsToExport) do
+        local safe_title = tostring(item.title):gsub("\n", " ") 
+        local safe_content = tostring(item.content):gsub("\n", "<NEWLINE>")
+        f:write(safe_title .. "|_|_|" .. safe_content .. "\n")
+      end
+      f:close()
+      
+      local success_dlg = LuaDialog()
+      success_dlg.setTitle("Exported Successfully")
+      success_dlg.setMessage(#itemsToExport .. " item(s) have been successfully backed up to one single file at:\n\n" .. exportPath)
+      success_dlg.setButton("OK", function() success_dlg.dismiss() end)
+      success_dlg.show()
+      
+      speakTTS("Data Exported Successfully")
+    else
+      showToast("Export Failed! Please check storage permissions.")
+    end
+  end)
+end
+
+local function showExportSelectionDialog()
+  local sel_dlg = LuaDialog()
+  sel_dlg.setTitle("Select Items to Export")
+  local s_ids = {}
+  
+  local sel_layout = {
+    LinearLayout;
+    orientation = "vertical";
+    {
+      TextView;
+      text = "Check the items you want to backup:";
+      padding = "10dp";
+      textColor = "#555555";
+    };
+    {
+      ScrollView;
+      layout_width = "fill";
+      layout_weight = "1";
+      {
+        LinearLayout;
+        id = "cb_container";
+        orientation = "vertical";
+        layout_width = "fill";
+        padding = "10dp";
+      };
+    };
+    {
+      LinearLayout;
+      orientation = "horizontal";
+      layout_width = "fill";
+      padding = "10dp";
+      gravity = "right";
+      {
+        Button;
+        text = "Cancel";
+        onClick = function() sel_dlg.dismiss() end;
+      };
+      {
+        Button;
+        text = "Export Now";
+        textColor = "#006600";
+        onClick = function()
+          local toExport = {}
+          for i, cb in ipairs(s_ids.checkboxes) do
+            if cb.isChecked() then
+              table.insert(toExport, savedData[i])
+            end
+          end
+          sel_dlg.dismiss()
+          performExport(toExport)
+        end;
+      };
+    };
+  }
+  
+  sel_dlg.setView(loadlayout(sel_layout, s_ids))
+  s_ids.checkboxes = {}
+  
+  for i, item in ipairs(savedData) do
+    local cb_view = loadlayout({
+      CheckBox;
+      text = tostring(item.title);
+      checked = false; -- Default to unchecked
+      layout_width = "fill";
+      textSize = "16sp";
+      textColor = "#333333";
+      padding = "5dp";
+    })
+    table.insert(s_ids.checkboxes, cb_view)
+    s_ids.cb_container.addView(cb_view)
+  end
+  
+  sel_dlg.show()
+end
+
+local function importFile(filePath)
+  pcall(function()
+    local f = io.open(filePath, "r")
+    local importedCount = 0
+    if f then
+      for line in f:lines() do
+        local t, c = line:match("^(.*)|_|_|(.*)$")
+        if t and c then
+          c = c:gsub("\r", "")
+          local original_content = c:gsub("<NEWLINE>", "\n")
+          local exists = false
+          for _, existing in ipairs(savedData) do
+            if existing.title == t and existing.content == original_content then
+              exists = true
+              break
+            end
+          end
+          if not exists then
+            table.insert(savedData, {title = t, content = original_content})
+            importedCount = importedCount + 1
+          end
+        end
+      end
+      f:close()
+      
+      if importedCount > 0 then
+        saveData() 
+        rebuildList(tostring(main_ids.search_bar.getText()))
+        local s_dlg = LuaDialog()
+        s_dlg.setTitle("Import Successful")
+        s_dlg.setMessage(importedCount .. " item(s) have been imported successfully!")
+        s_dlg.setButton("OK", function() s_dlg.dismiss() end)
+        s_dlg.show()
+        speakTTS("Import Successful")
+      else
+        showToast("Error: Invalid file format or data already exists!")
+      end
+    else
+      showToast("Failed to open the file!")
+    end
+  end)
+end
+
+local function showCustomFileBrowser(startPath)
+  local browser_dlg = LuaDialog()
+  local b_ids = {}
+  
+  local browser_layout = {
+    LinearLayout;
+    orientation = "vertical";
+    {
+      TextView;
+      id = "current_path_tv";
+      text = startPath;
+      padding = "10dp";
+      textSize = "12sp";
+      textColor = "#0055A4";
+      backgroundColor = "#E0E0E0";
+      layout_width = "fill";
+    };
+    {
+      ScrollView;
+      layout_width = "fill";
+      layout_weight = "1";
+      {
+        LinearLayout;
+        orientation = "vertical";
+        id = "files_container";
+        layout_width = "fill";
+        padding = "10dp";
+      };
+    };
+  }
+  
+  browser_dlg.setView(loadlayout(browser_layout, b_ids))
+  browser_dlg.setTitle("Select Backup (.txt) File")
+  
+  local function loadPath(path)
+    b_ids.files_container.removeAllViews()
+    b_ids.current_path_tv.setText("Path: " .. path)
+    
+    local dir = File(path)
+    
+    if path ~= "/storage/emulated/0" and path ~= "/" then
+      local backBtn = loadlayout({
+        Button;
+        text = "鐚拑绗� GO BACK";
+        layout_width = "fill";
+        textColor = "#AA0000";
+      })
+      pcall(function() backBtn.setAllCaps(false) end)
+      backBtn.onClick = function() loadPath(dir.getParent()) end
+      b_ids.files_container.addView(backBtn)
+    end
+    
+    if dir.exists() and dir.isDirectory() then
+      local files = dir.listFiles()
+      if files then
+        local sortedFiles = {}
+        for i=0, #files-1 do table.insert(sortedFiles, files[i]) end
+        table.sort(sortedFiles, function(a,b)
+          if a.isDirectory() and not b.isDirectory() then return true end
+          if not a.isDirectory() and b.isDirectory() then return false end
+          return a.getName():lower() < b.getName():lower()
+        end)
+        
+        for _, f in ipairs(sortedFiles) do
+          local fname = tostring(f.getName())
+          if f.isDirectory() and not fname:match("^%.") then
+            local btn = loadlayout({
+              Button;
+              text = "棣冩惂 " .. fname;
+              layout_width = "fill";
+              textColor = "#0055A4";
+            })
+            pcall(function() btn.setAllCaps(false) end)
+            btn.onClick = function() loadPath(f.getAbsolutePath()) end
+            b_ids.files_container.addView(btn)
+            
+          elseif f.isFile() and fname:match("%.txt$") then 
+            local btn = loadlayout({
+              Button;
+              text = "棣冩惈 " .. fname;
+              layout_width = "fill";
+              textColor = "#006600";
+            })
+            pcall(function() btn.setAllCaps(false) end)
+            btn.onClick = function()
+              browser_dlg.dismiss()
+              importFile(f.getAbsolutePath())
+            end
+            b_ids.files_container.addView(btn)
+          end
+        end
+      end
+    else
+      b_ids.files_container.addView(loadlayout({
+        TextView;
+        text = "This folder is empty or access is denied.";
+        gravity = "center";
+      }))
+    end
+  end
+  
+  loadPath(startPath)
+  browser_dlg.setButton("Cancel", function() browser_dlg.dismiss() end)
+  browser_dlg.show()
+end
+
+function showImportExportDialog()
+  local ie_dlg = LuaDialog()
+  local ie_ids = {} -- IDs table added here
+  
+  local ie_layout = {
+    LinearLayout;
+    orientation = "vertical";
+    padding = "20dp";
+    {
+      TextView;
+      id = "ie_menu_title"; -- Added ID to apply Bold text safely
+      text = "Backup / Restore Menu";
+      textSize = "18sp";
+      textColor = "#0055A4";
+      layout_marginBottom = "10dp";
+    };
+    {
+      TextView;
+      text = "You can export all items into a single file, select specific items to backup, or import an old backup.";
+      textSize = "14sp";
+      layout_marginBottom = "20dp";
+    };
+    {
+      Button;
+      text = "棣冩憹 Export ALL Data";
+      layout_width = "fill";
+      layout_marginBottom = "10dp";
+      onClick = function()
+        ie_dlg.dismiss()
+        if #savedData == 0 then showToast("No data to export!") else performExport(savedData) end
+      end;
+    };
+    {
+      Button;
+      text = "閳芥埊绗� Export SELECTED Data";
+      layout_width = "fill";
+      layout_marginBottom = "10dp";
+      onClick = function()
+        ie_dlg.dismiss()
+        if #savedData == 0 then showToast("No data to export!") else showExportSelectionDialog() end
+      end;
+    };
+    {
+      Button;
+      text = "棣冩憸 Import Backup File";
+      layout_width = "fill";
+      layout_marginBottom = "10dp";
+      textColor = "#006600";
+      onClick = function()
+        ie_dlg.dismiss()
+        showCustomFileBrowser("/storage/emulated/0/Download")
+      end;
+    };
+    {
+      Button;
+      text = "Cancel";
+      layout_width = "fill";
+      textColor = "#AA0000";
+      onClick = function() ie_dlg.dismiss() end;
+    };
+  }
+  
+  ie_dlg.setView(loadlayout(ie_layout, ie_ids))
+  -- Applying Bold property through code to avoid loadlayout error
+  ie_ids.ie_menu_title.setTypeface(Typeface.DEFAULT_BOLD) 
+  ie_dlg.show()
+end
+
+function showEditDialog(index)
+  local edit_dlg = LuaDialog()
+  local ids = {}
+  local max_title_chars = 100
+  local max_content_chars = 10000 
+  
+  local edit_layout = {
+    LinearLayout;
+    orientation = "vertical";
+    {
+      ScrollView;
+      layout_width = "fill";
+      layout_weight = "1"; 
+      {
+        LinearLayout;
+        orientation = "vertical";
+        padding = "20dp";
+        layout_width = "fill";
+        {
+          EditText;
+          text = savedData[index].title; 
+          hint = "Enter Title (Max 100 characters)";
+          id = "edit_title_field";
+          layout_width = "fill";
+          layout_marginBottom = "2dp";
+        };
+        {
+          TextView;
+          id = "title_counter";
+          text = "0 / 100";
+          textColor = "#888888";
+          textSize = "12sp";
+          layout_marginBottom = "10dp";
+          gravity = "right";
+          layout_width = "fill";
+        };
+        {
+          EditText;
+          text = savedData[index].content; 
+          hint = "Enter Description / Content (Max 10000 characters)";
+          id = "edit_content_field";
+          layout_width = "fill";
+          layout_marginBottom = "2dp";
+          gravity = "top"; 
+          minLines = "4";  
+        };
+        {
+          TextView;
+          id = "content_counter";
+          text = "0 / 10000";
+          textColor = "#888888";
+          textSize = "12sp";
+          layout_marginBottom = "10dp";
+          gravity = "right";
+          layout_width = "fill";
+        };
+        {
+          TextView;
+          id = "error_msg";
+          text = "";
+          textColor = "#FF0000"; 
+          textSize = "14sp";
+          layout_marginBottom = "10dp";
+        };
+      };
+    };
+    {
+      LinearLayout;
+      orientation = "horizontal";
+      layout_width = "fill";
+      gravity = "right"; 
+      padding = "20dp";
+      paddingTop = "0dp";
+      {
+        Button;
+        text = "Cancel";
+        onClick = function() edit_dlg.dismiss() end;
+      };
+      {
+        Button;
+        id = "save_btn";
+        text = "Save Changes";
+        onClick = function()
+          local t = ids.edit_title_field.getText().toString()
+          local c = ids.edit_content_field.getText().toString()
+          
+          savedData[index].title = t
+          savedData[index].content = c
+          saveData()
+          rebuildList(tostring(main_ids.search_bar.getText()))
+          showToast("Item Updated Successfully")
+          edit_dlg.dismiss()
+        end;
+      };
+    };
+  }
+  
+  edit_dlg.setTitle("Edit Item")
+  edit_dlg.setView(loadlayout(edit_layout, ids))
+  
+  local watcher = TextWatcher{
+    onTextChanged=function()
+      local t = tostring(ids.edit_title_field.getText())
+      local c = tostring(ids.edit_content_field.getText())
+      
+      local t_len = (utf8 and utf8.len(t)) or #t
+      local c_len = (utf8 and utf8.len(c)) or #c
+      
+      ids.title_counter.setText(t_len .. " / " .. max_title_chars)
+      ids.content_counter.setText(c_len .. " / " .. max_content_chars)
+      
+      local exists = false
+      for i, item in ipairs(savedData) do
+        if i ~= index and (item.title == t or item.content == c) then
+          exists = true
+          break
+        end
+      end
+      
+      if t_len > max_title_chars then
+        ids.error_msg.setText("Title Limit Exceeded! Maximum " .. max_title_chars .. " characters allowed.")
+        ids.save_btn.setEnabled(false)
+      elseif c_len > max_content_chars then
+        ids.error_msg.setText("Content Limit Exceeded! Maximum " .. max_content_chars .. " characters allowed.")
+        ids.save_btn.setEnabled(false)
+      elseif exists then
+        ids.error_msg.setText("This Title or Description already exists!")
+        ids.save_btn.setEnabled(false)
+      else
+        ids.error_msg.setText("")
+        if t:match("%S") and c:match("%S") then
+          ids.save_btn.setEnabled(true)
+        else
+          ids.save_btn.setEnabled(false)
+        end
+      end
+    end
+  }
+  ids.edit_title_field.addTextChangedListener(watcher)
+  ids.edit_content_field.addTextChangedListener(watcher)
+  
+  local initial_t = savedData[index].title
+  local initial_c = savedData[index].content
+  ids.title_counter.setText(((utf8 and utf8.len(initial_t)) or #initial_t) .. " / " .. max_title_chars)
+  ids.content_counter.setText(((utf8 and utf8.len(initial_c)) or #initial_c) .. " / " .. max_content_chars)
+  
+  edit_dlg.show()
+end
+
+function showAddDialog()
+  local add_dlg = LuaDialog()
+  local ids = {}
+  local max_title_chars = 100
+  local max_content_chars = 10000 
+  
+  local add_layout = {
+    LinearLayout;
+    orientation = "vertical";
+    {
+      ScrollView;
+      layout_width = "fill";
+      layout_weight = "1"; 
+      {
+        LinearLayout;
+        orientation = "vertical";
+        padding = "20dp";
+        layout_width = "fill";
+        {
+          EditText;
+          hint = "Enter Title (Max 100 characters)";
+          id = "edit_title";
+          layout_width = "fill";
+          layout_marginBottom = "2dp";
+        };
+        {
+          TextView;
+          id = "title_counter";
+          text = "0 / 100";
+          textColor = "#888888";
+          textSize = "12sp";
+          layout_marginBottom = "10dp";
+          gravity = "right";
+          layout_width = "fill";
+        };
+        {
+          EditText;
+          hint = "Enter Description / Content (Max 10000 characters)";
+          id = "edit_content";
+          layout_width = "fill";
+          layout_marginBottom = "2dp";
+          gravity = "top"; 
+          minLines = "4"; 
+        };
+        {
+          TextView;
+          id = "content_counter";
+          text = "0 / 10000";
+          textColor = "#888888";
+          textSize = "12sp";
+          layout_marginBottom = "10dp";
+          gravity = "right";
+          layout_width = "fill";
+        };
+        {
+          TextView;
+          id = "error_msg";
+          text = "";
+          textColor = "#FF0000"; 
+          textSize = "14sp";
+          layout_marginBottom = "10dp";
+        };
+      };
+    };
+    {
+      LinearLayout;
+      orientation = "horizontal";
+      layout_width = "fill";
+      gravity = "right"; 
+      padding = "20dp";
+      paddingTop = "0dp";
+      {
+        Button;
+        text = "Cancel";
+        onClick = function() add_dlg.dismiss() end;
+      };
+      {
+        Button;
+        id = "save_btn";
+        text = "Save Item";
+        onClick = function()
+          local t = ids.edit_title.getText().toString()
+          local c = ids.edit_content.getText().toString()
+          
+          table.insert(savedData, {title = t, content = c})
+          saveData()
+          rebuildList(tostring(main_ids.search_bar.getText())) 
+          showToast("Item Added Successfully")
+          add_dlg.dismiss()
+        end;
+      };
+    };
+  }
+  
+  add_dlg.setTitle("Add New Item")
+  add_dlg.setView(loadlayout(add_layout, ids))
+  
+  ids.save_btn.setEnabled(false) 
+  
+  local watcher = TextWatcher{
+    onTextChanged=function()
+      local t = tostring(ids.edit_title.getText())
+      local c = tostring(ids.edit_content.getText())
+      
+      local t_len = (utf8 and utf8.len(t)) or #t
+      local c_len = (utf8 and utf8.len(c)) or #c
+      
+      ids.title_counter.setText(t_len .. " / " .. max_title_chars)
+      ids.content_counter.setText(c_len .. " / " .. max_content_chars)
+      
+      local exists = false
+      for _, item in ipairs(savedData) do
+        if item.title == t or item.content == c then
+          exists = true
+          break
+        end
+      end
+      
+      if t_len > max_title_chars then
+        ids.error_msg.setText("Title Limit Exceeded! Maximum " .. max_title_chars .. " characters allowed.")
+        ids.save_btn.setEnabled(false)
+      elseif c_len > max_content_chars then
+        ids.error_msg.setText("Content Limit Exceeded! Maximum " .. max_content_chars .. " characters allowed.")
+        ids.save_btn.setEnabled(false)
+      elseif exists then
+        ids.error_msg.setText("This Title or Description already exists!")
+        ids.save_btn.setEnabled(false)
+      else
+        ids.error_msg.setText("")
+        if t:match("%S") and c:match("%S") then
+          ids.save_btn.setEnabled(true)
+        else
+          ids.save_btn.setEnabled(false)
+        end
+      end
+    end
+  }
+  ids.edit_title.addTextChangedListener(watcher)
+  ids.edit_content.addTextChangedListener(watcher)
+  
+  add_dlg.show()
+end
+
+function addTitleButton(item_title, item_content, orig_index)
+  local ids = {} 
+  local btn_layout = {
+    LinearLayout;
+    layout_width = "fill";
+    {
+      Button;
+      id = "myBtn"; 
+      text = tostring(item_title); 
+      layout_width = "fill";
+      layout_marginBottom = "5dp";
+    };
+  }
+  
+  local view = loadlayout(btn_layout, ids)
+  pcall(function() ids.myBtn.setAllCaps(false) end)
+  
+  ids.myBtn.onClick = function()
+    pcall(function()
+      local clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+      local clip = ClipData.newPlainText("Rizvi", tostring(item_content))
+      clipboard.setPrimaryClip(clip)
+    end)
+    
+    dlg.dismiss()
+    
+    Handler(Looper.getMainLooper()).postDelayed(function()
+      local pasted = false
+      pcall(function()
+        if service then
+          local root = service.getRootInActiveWindow()
+          if root then
+            local focusedNode = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if focusedNode and (focusedNode.isEditable() or (focusedNode.getClassName() and tostring(focusedNode.getClassName()) == "android.widget.EditText")) then
+              pasted = focusedNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+            end
+            
+            if not pasted then
+              local function searchAndPaste(node)
+                if not node then return false end
+                if node.isEditable() or (node.getClassName() and tostring(node.getClassName()) == "android.widget.EditText") then
+                  node.performAction(AccessibilityNodeInfo.ACTION_FOCUS) 
+                  return node.performAction(AccessibilityNodeInfo.ACTION_PASTE) 
+                end
+                
+                for i = 0, node.getChildCount() - 1 do
+                  if searchAndPaste(node.getChild(i)) then
+                    return true
+                  end
+                end
+                return false
+              end
+              
+              pasted = searchAndPaste(root)
+            end
+          end
+        end
+      end)
+      
+      if pasted then
+        vibrateDevice()
+        speakTTS("Item Pasted")
+        showToast("Content Pasted Successfully!")
+      else
+        speakTTS("Text Box Not Found")
+        showToast("Content copied, but Text Box Not Found!")
+      end
+    end, 500)
+  end
+  
+  ids.myBtn.onLongClick = function()
+    local opt_dlg = LuaDialog()
+    opt_dlg.setTitle("Options: " .. tostring(item_title))
+    
+    local opt_layout = {
+      LinearLayout;
+      orientation = "vertical";
+      padding = "20dp";
+      {
+        Button;
+        text = "Copy Content Only";
+        layout_width = "fill";
+        layout_marginBottom = "10dp";
+        onClick = function()
+          pcall(function()
+            local clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+            local clip = ClipData.newPlainText("Rizvi", tostring(item_content))
+            clipboard.setPrimaryClip(clip)
+          end)
+          vibrateDevice()
+          showToast("Content Copied to Clipboard!")
+          speakTTS("Text Copied")
+          opt_dlg.dismiss()
+        end;
+      };
+      {
+        Button;
+        text = "Share Content";
+        layout_width = "fill";
+        layout_marginBottom = "10dp";
+        onClick = function()
+          pcall(function()
+             local shareIntent = Intent(Intent.ACTION_SEND)
+             shareIntent.setType("text/plain")
+             shareIntent.putExtra(Intent.EXTRA_TEXT, tostring(item_content))
+             ctx.startActivity(Intent.createChooser(shareIntent, "Share via..."))
+          end)
+          opt_dlg.dismiss()
+          dlg.dismiss()
+        end;
+      };
+      {
+        Button;
+        text = "Edit Item";
+        layout_width = "fill";
+        layout_marginBottom = "10dp";
+        onClick = function()
+          opt_dlg.dismiss()
+          showEditDialog(orig_index)
+        end;
+      };
+      {
+        Button;
+        text = "Delete Item";
+        textColor = "#FF0000"; 
+        layout_width = "fill";
+        layout_marginBottom = "10dp";
+        onClick = function()
+          opt_dlg.dismiss()
+          local del_dlg = LuaDialog()
+          del_dlg.setTitle("Confirm Delete")
+          del_dlg.setMessage("Are you sure you want to delete '" .. tostring(item_title) .. "'?")
+          del_dlg.setButton("Yes, Delete", function()
+            table.remove(savedData, orig_index) 
+            saveData() 
+            rebuildList(tostring(main_ids.search_bar.getText())) 
+            speakTTS("Item Deleted")
+            showToast("Item Deleted!")
+          end)
+          del_dlg.setButton2("Cancel", function() del_dlg.dismiss() end)
+          del_dlg.show()
+        end;
+      };
+      {
+        Button;
+        text = "Cancel";
+        layout_width = "fill";
+        onClick = function()
+          opt_dlg.dismiss()
+        end;
+      };
+    }
+    
+    opt_dlg.setView(loadlayout(opt_layout))
+    opt_dlg.show()
+    return true 
+  end
+  
+  main_ids.dynamic_list.addView(view)
+end
+
+function rebuildList(query)
+  main_ids.dynamic_list.removeAllViews()
+  query = query and query:lower() or ""
+  
+  main_ids.total_items_count.setText("Total Saved Items: " .. #savedData)
+  
+  local count = 0
+  for orig_index, item in ipairs(savedData) do
+    if query == "" or item.title:lower():find(query, 1, true) or item.content:lower():find(query, 1, true) then
+      addTitleButton(item.title, item.content, orig_index)
+      count = count + 1
+    end
+  end
+  
+  if count == 0 then
+    local empty_layout = {
+      LinearLayout;
+      layout_width = "fill";
+      padding = "20dp";
+      gravity = "center";
+      {
+        TextView;
+        text = "No Data Found";
+        textSize = "16sp";
+        textColor = "#888888"; 
+      };
+    }
+    main_ids.dynamic_list.addView(loadlayout(empty_layout))
+  end
+end
+
+-- === MAIN UI LAYOUT ===
+local layout = {
+  LinearLayout;
+  orientation = "vertical";
+  padding = "20dp";
+  
+  {
+    TextView;
+    id = "main_heading"; 
+    text = "Data Saver by Rizvi Lover Cricket Board";
+    textSize = "18sp";
+    textColor = "#000000";
+    gravity = "center";
+    layout_width = "fill";
+    layout_marginBottom = "5dp";
+  };
+  {
+    TextView;
+    text = "Developer: RLC Board";
+    textSize = "14sp";
+    textColor = "#555555";
+    gravity = "center";
+    layout_width = "fill";
+    layout_marginBottom = "5dp";
+  };
+  {
+    TextView;
+    id = "total_items_count";
+    text = "Total Saved Items: 0";
+    textSize = "14sp";
+    textColor = "#006600";
+    gravity = "center";
+    layout_width = "fill";
+    layout_marginBottom = "15dp";
+  };
+  
+  {
+    Button;
+    text = "Add New Item";
+    textSize = "16sp";
+    textColor = "#006600";
+    layout_width = "fill";
+    layout_marginBottom = "10dp";
+    onClick = function()
+      showAddDialog()
+    end;
+  };
+  
+  {
+    EditText;
+    id = "search_bar";
+    hint = "Search saved items...";
+    layout_width = "fill";
+    layout_marginBottom = "10dp";
+    singleLine = true;
+  };
+  
+  {
+    ScrollView;
+    layout_width = "fill";
+    layout_weight = "1";
+    layout_marginBottom = "15dp";
+    {
+      LinearLayout;
+      orientation = "vertical";
+      id = "dynamic_list";
+      layout_width = "fill";
+    };
+  };
+  
+  {
+    Button;
+    text = "Clear All Data";
+    textSize = "15sp";
+    textColor = "#FF0000"; 
+    layout_width = "fill";
+    layout_marginBottom = "5dp";
+    onClick = function()
+      if #savedData == 0 then
+          showToast("Storage is already empty!")
+          return
+      end
+      local clear_dlg = LuaDialog()
+      clear_dlg.setTitle("Clear All Data")
+      clear_dlg.setMessage("Are you sure you want to delete ALL saved items? This action cannot be undone.")
+      clear_dlg.setButton("Yes, Delete All", function()
+          savedData = {}
+          saveData()
+          rebuildList(tostring(main_ids.search_bar.getText()))
+          showToast("All data cleared successfully!")
+          speakTTS("All data deleted")
+      end)
+      clear_dlg.setButton2("Cancel", function() clear_dlg.dismiss() end)
+      clear_dlg.show()
+    end;
+  };
+
+  {
+    Button;
+    text = "Backup (Import / Export)";
+    textSize = "15sp";
+    textColor = "#0055A4";
+    layout_width = "fill";
+    layout_marginBottom = "10dp";
+    onClick = function()
+      showImportExportDialog()
+    end;
+  };
+  
+  {
+    LinearLayout;
+    orientation = "horizontal";
+    layout_width = "fill";
+    {
+      Button;
+      text = "About Details";
+      textSize = "14sp";
+      layout_weight = "1";
+      onClick = function()
+        showAboutDialog()
+      end;
+    };
+    {
+      Button;
+      text = "Exit";
+      textSize = "14sp";
+      layout_weight = "1";
+      onClick = function()
+        dlg.dismiss()
+      end;
+    };
+  };
+}
+
+dlg.setView(loadlayout(layout, main_ids))
+main_ids.main_heading.setTypeface(Typeface.DEFAULT_BOLD)
+
+main_ids.search_bar.addTextChangedListener(TextWatcher{
+  onTextChanged=function(text)
+    rebuildList(tostring(text))
+  end
+})
+
+loadData()
+rebuildList()
+
+dlg.show()
